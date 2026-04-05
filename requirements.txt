@@ -1,0 +1,2 @@
+# Uses Python 3.14.3
+pyzmq==27.1.0
