@@ -1,23 +1,27 @@
-import time
+import asyncio
 import zmq
+import zmq.asyncio
+from config import PUSH_PULL_SOCKET, PUB_SUB_SOCKET
 
-context = zmq.Context()
-socket_receiver = context.socket(zmq.PULL)
-socket_receiver.bind("tcp://*:5555")
+class Sequencer:
+    def __init__(self):
+        self.context = zmq.asyncio.Context()
+        self.socket_receiver = self.context.socket(zmq.PULL)
+        self.socket_receiver.bind(PUSH_PULL_SOCKET)
+        self.socket_broadcast = self.context.socket(zmq.PUB)
+        self.socket_broadcast.bind(PUB_SUB_SOCKET)
 
-socket_broadcast = context.socket(zmq.PUB)
-socket_broadcast.bind("tcp://*:5556")
+    async def run(self):
+        print("Sequencer running...")
+        while True:
+            message = await self.socket_receiver.recv()
+            print("Received message: %s" % message.decode("utf-8"))
+            await self.socket_broadcast.send(message)
 
-log = []
-while True:
-    #  Wait for next request from client
-    log.append(socket_receiver.recv())
 
-    message = log.pop(0)
-    print("Received request: %s" % message.decode('utf-8'))
+async def main():
+    sequencer = Sequencer()
+    await sequencer.run()
 
-    #  Do some 'work'
-    time.sleep(1)
-
-    #  Send reply back to client
-    socket_broadcast.send(message)
+if __name__ == "__main__":
+    asyncio.run(main())
