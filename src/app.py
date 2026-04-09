@@ -3,41 +3,32 @@ import json
 import multiprocessing
 from multiprocessing import Queue
 from worker import Worker
-from message import Message
-
 N_WORKERS = 3
 WORKER_RESPONSES = {}
 
 
-async def broadcast_all(process_id: int, messages: list[str]):
-    worker = Worker(process_id)
-    responses: list[str] = []
-    for text in messages:
-        response = await worker.broadcast(Message(text=text))
-        responses.append(json.loads(response)["text"])
-    return responses
-
-
-def worker_process_main(process_id: int, messages: list[str], result_queue: Queue):
-    responses = asyncio.run(broadcast_all(process_id, messages))
+def broadcast_all(process_id: int, messages: list[str], total_messages: int, result_queue: Queue):
+    worker = Worker(process_id, messages, total_messages)
+    received = asyncio.run(worker.start_broadcast())
+    responses = [json.loads(r)["text"] for r in received]
     result_queue.put((process_id, responses))
 
-
-async def main():
+def main():
     print("Starting main...")
     messages = [f"msg_{i}" for i in range(10)]
 
     print(f"{messages}")
 
-    chunks = [messages[process_id::N_WORKERS] for process_id in range(N_WORKERS)]
+    messages_partitions = [messages[process_id::N_WORKERS] for process_id in range(N_WORKERS)]
+    total = len(messages)
 
     result_queue = Queue()
     processes = [
         multiprocessing.Process(
-            target=worker_process_main,
-            args=(process_id, chunk, result_queue),
+            target=broadcast_all,
+            args=(process_id, messages_partition, total, result_queue),
         )
-        for process_id, chunk in enumerate(chunks)
+        for process_id, messages_partition in enumerate(messages_partitions)
     ]
     for p in processes:
         p.start()
@@ -52,4 +43,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
