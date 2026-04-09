@@ -28,15 +28,28 @@ class Worker:
 
     async def start_broadcast(self):
         try:
-            recv_task = asyncio.create_task(self.receiver(self.total_messages))
-            await asyncio.sleep(0.2)
+            print(f"Starting receiver in process {self.id}...")
+            receiver_task = asyncio.create_task(self.receiver(self.total_messages))
+            await asyncio.sleep(5)
+            print(f"Receiver in process {self.id} started")
+            
+            print(f"Process {self.id} broadcasting messages...")
             for message in self.messages:
                 await asyncio.sleep(random.uniform(0.0, 0.5))
                 await self.broadcast(Message(text=message).serialize())
 
-            await recv_task
+            await receiver_task
         finally:
             self.socket_receiver.close(linger=0)
             self.socket_sender.close(linger=0)
             self.context.term()
         return self.received
+
+
+async def main():
+    worker = Worker(0, ["test_msg_0", "test_msg_1", "test_msg_2"], 3)
+    received = await worker.start_broadcast()
+    print(f'Received messages in process {worker.id}: {received}')
+
+if __name__ == "__main__":
+    asyncio.run(main())
