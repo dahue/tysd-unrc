@@ -1,3 +1,3 @@
-# Socket addresses
-PUSH_PULL_SOCKET = "tcp://localhost:5555"
-PUB_SUB_SOCKET = "tcp://localhost:5556"
+# Socket base address
+BASE_ADDRESS= "tcp://localhost"
+BASE_PORT   = 5600
