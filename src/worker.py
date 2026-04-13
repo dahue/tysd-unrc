@@ -1,55 +1,135 @@
 import asyncio
-import random
+import heapq
+import json
+
 import zmq
 import zmq.asyncio
+
 from message import Message
-from config import PUSH_PULL_SOCKET, PUB_SUB_SOCKET
+from config import BASE_ADDRESS, BASE_PORT
+
 
 class Worker:
-    def __init__(self, id: int, messages: list[str], total_messages: int):
-        self.id = id
+    def __init__(self, worker_id: int, messages: list[str], total_messages: int, n_workers: int):
+        self.id = worker_id
         self.messages = messages
         self.total_messages = total_messages
+        self.n_workers = n_workers
+
+        # Timestamp state
+        self.timestamp: int = 0
+        self.workers_last_timestamp = [0] * n_workers  # last received timestamp per worker
+
+        # Delivery buffer: priority queue of (timestamp, worker_id, message)
+        self.priority_queue = [] # priority queue of messages to deliver
+        self.delivered = []
+
+        # ZMQ setup
         self.context = zmq.asyncio.Context()
-        self.socket_sender = self.context.socket(zmq.PUSH)
-        self.socket_sender.connect(PUSH_PULL_SOCKET)
-        self.socket_receiver = self.context.socket(zmq.SUB)
-        self.socket_receiver.setsockopt(zmq.SUBSCRIBE, b"")
-        self.socket_receiver.connect(PUB_SUB_SOCKET)
-        self.received = []
 
-    async def broadcast(self, msg: bytes):
-        await self.socket_sender.send(msg)
+        self.pub = self.context.socket(zmq.PUB)
+        self.pub.bind(f"{BASE_ADDRESS}:{BASE_PORT + worker_id}")
 
-    async def receiver(self, total_messages: int):
-        while len(self.received) < total_messages:
-            raw = await self.socket_receiver.recv()
-            self.received.append(raw.decode("utf-8"))
+        self.sub = self.context.socket(zmq.SUB)
+        self.sub.setsockopt(zmq.SUBSCRIBE, b"")
+        for i in range(n_workers):
+            self.sub.connect(f"{BASE_ADDRESS}:{BASE_PORT + i}")
 
-    async def start_broadcast(self):
-        try:
-            print(f"Starting receiver in process {self.id}...")
-            receiver_task = asyncio.create_task(self.receiver(self.total_messages))
-            await asyncio.sleep(5)
-            print(f"Receiver in process {self.id} started")
-            
-            print(f"Process {self.id} broadcasting messages...")
-            for message in self.messages:
-                await asyncio.sleep(random.uniform(0.0, 0.5))
-                await self.broadcast(Message(text=message).serialize())
 
-            await receiver_task
-        finally:
-            self.socket_receiver.close(linger=0)
-            self.socket_sender.close(linger=0)
-            self.context.term()
-        return self.received
+    def _send_event(self) -> int:
+        """Increment clock for a local send event; return the new clock."""
+        self.timestamp += 1
+        return self.timestamp
 
+    def _recv_event(self, incoming: int) -> None:
+        """Update clock on receive: clock = max(local, incoming) + 1."""
+        self.timestamp = max(self.timestamp, incoming) + 1
+
+
+    def _try_deliver(self) -> None:
+        """Deliver every stable message at the head of the priority queue."""
+        while self.priority_queue:
+            timestamp, _, raw = self.priority_queue[0] # (timestamp, pid, message)
+            # A message is stable when every worker has sent at least one
+            # message with timestamp >= this message's timestamp.
+            if min(self.workers_last_timestamp) >= timestamp:
+                heapq.heappop(self.priority_queue)
+                self.delivered.append(raw)
+            else:
+                break
+
+
+    async def receiver(self) -> None:
+        """Receive until all DATA broadcasts and one SENTINEL per peer are seen."""
+        data_received = 0
+        sentinels_received = 0
+
+        while data_received < self.total_messages or sentinels_received < self.n_workers:
+            raw = await self.sub.recv()
+            msg = Message.deserialize(raw)
+
+            self._recv_event(msg.timestamp)
+            self.workers_last_timestamp[msg.sender_id] = max(
+                self.workers_last_timestamp[msg.sender_id], msg.timestamp
+            )
+
+            if msg.msg_type == Message.DATA:
+                heapq.heappush(self.priority_queue, (msg.timestamp, msg.sender_id, raw))
+                data_received += 1
+            else:
+                sentinels_received += 1
+
+            self._try_deliver()
+
+
+    async def start_broadcast(self) -> list[bytes]:
+        recv_task = asyncio.create_task(self.receiver())
+
+        await asyncio.sleep(1)
+
+        for message in self.messages:
+            ts = self._send_event()
+            msg = Message(
+                message=message,
+                timestamp=ts,
+                sender_id=self.id,
+                msg_type=Message.DATA,
+            )
+            await self.pub.send(msg.serialize())
+
+        ts = self._send_event()
+        sentinel = Message(
+            timestamp=ts,
+            sender_id=self.id,
+            msg_type=Message.SENTINEL,
+        )
+        await self.pub.send(sentinel.serialize())
+
+        await recv_task
+
+        self.pub.close(linger=0)
+        self.sub.close(linger=0)
+        self.context.term()
+
+        return self.delivered
 
 async def main():
-    worker = Worker(0, ["test_msg_0", "test_msg_1", "test_msg_2"], 3)
-    received = await worker.start_broadcast()
-    print(f'Received messages in process {worker.id}: {received}')
+    pid = 0
+    messages = ["test_msg_0", "test_msg_1", "test_msg_2"]
+    n_workers = 1
+    worker = Worker(pid, messages, len(messages), n_workers)
+    delivered = await worker.start_broadcast()
+    result = [Message.deserialize(r) for r in delivered]
+    rows = [
+        {
+            "message": m.message,
+            "timestamp": m.timestamp,
+            "sender_id": m.sender_id,
+            "msg_type": m.msg_type,
+        }
+        for m in result
+    ]
+    print(f'Received messages in process {pid}: {json.dumps(rows, indent=2)}')
 
 if __name__ == "__main__":
     asyncio.run(main())
